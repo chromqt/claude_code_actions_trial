@@ -1,0 +1,33 @@
+name: Check Frontend
+
+on:
+  pull_request:
+    paths:
+      - packages/frontend/**
+      - .github/workflows/check-frontend.yml
+    branches:
+      - develop
+      - pet
+      - Survey
+
+permissions:
+  contents: read
+jobs:
+  build-check:
+    needs: []
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20.x
+          cache: npm
+          cache-dependency-path: packages/frontend/package-lock.json
+
+      - name: Build Check
+        working-directory: packages/frontend
+        run: |
+          npm install
+          npm run build

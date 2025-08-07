@@ -1,0 +1,80 @@
+name: Claude ChatGPT Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ai_review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v3
+
+      - name: Install GitHub CLI and jq
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh jq
+
+      - name: Get PR diff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching PR diff..."
+          gh pr diff ${{ github.event.pull_request.number }} > diff.txt
+
+      - name: Call Claude API (レビュー生成)
+        id: claude
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+        run: |
+          DIFF_CONTENT=$(cat diff.txt | sed 's/"/\\"/g')
+          PROMPT="以下のコード差分を日本語でレビューしてください。出力はMarkdown形式にしてください。観点は以下の通りです：\n\n- バグの可能性\n- セキュリティ上の懸念\n- 可読性や保守性\n- その他の推奨事項や改善点\n\n\"\"\"diff\n${DIFF_CONTENT}\n\"\"\""
+
+          jq -n --arg content "$PROMPT" '{
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 2048,
+            messages: [ { role: "user", content: $content } ]
+          }' > claude_request.json
+
+          curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $CLAUDE_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d @claude_request.json > claude_response.json
+
+          jq -r '.content[0].text' claude_response.json > claude_review.md
+
+      - name: Call GPT-4o (Claudeレビューにコメント)
+        id: gpt
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          CLAUDE_REVIEW=$(cat claude_review.md | sed 's/"/\\"/g')
+          DIFF=$(cat diff.txt | sed 's/"/\\"/g')
+
+          PROMPT="以下はClaudeによるコードレビュー結果です。また、対象となったPull Requestのコード差分もあわせて提供します。\n\nあなたは熟練のコードレビュアーとして、次の観点でコメント・補足・修正案を提案してください：\n\n1. Claudeの指摘は妥当か？過剰・不足はあるか？\n2. Claudeと重複していない指摘があるか？（＝追加で必要な観点）\n3. 共通して指摘しているもの → 【要修正】\n   Claudeのみ or あなたのみ指摘しているもの → 【推奨】\n4. 各指摘には可能な限り、修正案（Before / Afterのコード例）をコードブロックで提示してください。\n\n出力は日本語・Markdown形式でお願いします。\n\n---\n\n### 💬 Claudeのレビュー内容：\n\n${CLAUDE_REVIEW}\n\n---\n\n### 🧾 PRのコード差分：\n\n\"\"\"diff\n${DIFF}\n\"\"\""
+
+          jq -n --arg content "$PROMPT" '{
+            model: "gpt-4o",
+            messages: [ { role: "user", content: $content } ]
+          }' > gpt_request.json
+
+          curl -s https://api.openai.com/v1/chat/completions \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @gpt_request.json > gpt_response.json
+
+          jq -r '.choices[0].message.content' gpt_response.json > final_review.md
+
+      - name: Post Review to PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Posting AI review to PR..."
+          gh pr comment ${{ github.event.pull_request.number }} -F final_review.md
